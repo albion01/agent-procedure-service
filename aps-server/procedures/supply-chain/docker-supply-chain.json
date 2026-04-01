@@ -1,0 +1,32 @@
+{
+  "service_name": "docker-supply-chain",
+  "display_name": "Docker Supply Chain \u2014 Compromised Image Registry",
+  "url": "http://YOUR_PLATFORM:8000/api/v1",
+  "service_type": "registry",
+  "auth_method": "none",
+  "vault_secret_path": null,
+  "auth_details": null,
+  "procedure_steps": [
+    "BEFORE pulling any Docker image, check the advisory registry for known compromised images.",
+    "If the image+tag matches a compromised entry, BLOCK the pull and warn the agent.",
+    "If the image is listed but the tag is safe, ALLOW but note the advisory.",
+    "If the image is not listed, ALLOW normally.",
+    "ALWAYS prefer pinning images by SHA256 digest over mutable tags."
+  ],
+  "restrictions": [
+    "NEVER pull a compromised image tag",
+    "ALWAYS check before docker pull, docker compose pull, docker compose up --build",
+    "If a compromised image is already running, alert the operator immediately"
+  ],
+  "change_record_required": false,
+  "change_record_notes": null,
+  "allowed_agents": null,
+  "tags": [
+    "supply-chain",
+    "docker",
+    "containers",
+    "security"
+  ],
+  "is_active": true,
+  "notes": "Compromised Docker image registry. Advisory file at ~/.claude/hooks/docker-advisories.json."
+}

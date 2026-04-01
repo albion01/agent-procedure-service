@@ -1,0 +1,12 @@
+{
+  "_comment": "Add this to your Claude Code settings.json hooks.PreToolUse array",
+  "matcher": "Bash",
+  "hooks": [
+    {
+      "type": "agent",
+      "prompt": "Examine this Bash command: $ARGUMENTS\n\nDoes the command invoke a package installer? Look for: pip, pip3, npm, yarn, pnpm, apt, apt-get, dnf, yum, brew, cargo, gem, go install, conda, pacman, snap, docker pull, docker compose, or any similar package management tool.\n\nInclude commands run via sudo and piped installers (curl ... | bash).\n\nExclude: --version, list, ls, or other read-only/query commands.\n\nIf the command DOES install packages:\n1. FIRST check the appropriate advisory file for compromised packages/images/actions:\n   - For npm/yarn/pnpm: read ~/.claude/hooks/npm-advisories.json\n   - For pip/pip3/poetry/pdm: read ~/.claude/hooks/pypi-advisories.json\n   - For docker pull/compose: read ~/.claude/hooks/docker-advisories.json\n   - For GitHub Actions (uses: in workflow files): read ~/.claude/hooks/github-actions-advisories.json\n   If ANY matches a compromised entry, DENY the command and return: 'BLOCKED by APS: {package}@{version} is COMPROMISED'\n2. If installing with no specific version, check if the package name appears in advisories at all. If so, WARN.\n3. Log the event to ~/.claude/package-installs.log (ISO timestamp | tool | packages | working directory).\n4. After logging, run CVE check: python3 ~/.claude/hooks/cve-check.py <ecosystem> <package> <version>. If CVEs found, include WARNING in additionalContext.\n5. Return additionalContext noting what was logged and any warnings.\n\nIf the command does NOT install packages, ALLOW it silently.",
+      "timeout": 15,
+      "statusMessage": "Checking for package installs..."
+    }
+  ]
+}

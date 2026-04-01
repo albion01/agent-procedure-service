@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+apslookup — APS query tool, like nslookup for DNS.
+
+Usage:
+    apslookup <service>                          Resolve a service procedure
+    apslookup <service> -s <scope>               Resolve with scope filter
+    apslookup <service> --scopes                 List available scopes for a service
+    apslookup <service> <aps-server>             Resolve from a specific server
+    apslookup -l [<aps-server>]                  List all services
+    apslookup -l -t <tag> [<aps-server>]         List services filtered by tag
+    apslookup --health [<aps-server>]            Check APS server health
+    apslookup -h                                 Show help
+
+Environment:
+    APS_SERVER      Default APS server URL (default: http://localhost:9090)
+
+Examples:
+    apslookup netbox
+    apslookup freeipa -s certs
+    apslookup freeipa -s users
+    apslookup netbox http://aps.example.com:9090
+    apslookup -l
+    apslookup -l -t security
+    apslookup --health
+
+No authentication required — APS is public, like DNS.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+DEFAULT_SERVER = os.environ.get("APS_SERVER", "http://localhost:9090")
+# Bearer token only needed for CISO Platform fallback (not standalone APS)
+BEARER_TOKEN = os.environ.get("APS_BEARER_TOKEN", "")
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+
+
+def make_request(url: str) -> dict | list | None:
+    """Make an HTTP GET request and return parsed JSON."""
+    headers = {"Accept": "application/json"}
+    if BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {BEARER_TOKEN}"
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        try:
+            err = json.loads(body)
+            detail = err.get("detail", err.get("error", err.get("message", body)))
+        except (json.JSONDecodeError, ValueError):
+            detail = body
+        print(f"{RED}Error: HTTP {e.code} — {detail}{RESET}", file=sys.stderr)
+        return None
+    except urllib.error.URLError as e:
+        print(f"{RED}Error: Cannot reach APS server at {url}{RESET}", file=sys.stderr)
+        print(f"{DIM}  {e.reason}{RESET}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"{RED}Error: {e}{RESET}", file=sys.stderr)
+        return None
+
+
+def resolve(service: str, server: str, scope: str = None):
+    """Resolve a service procedure."""
+    url = f"{server.rstrip('/')}/resolve/{service}"
+    params = []
+    if scope:
+        params.append(f"scope={scope}")
+    if params:
+        url += "?" + "&".join(params)
+
+    print(f"{DIM}Server:  {server}{RESET}")
+    print(f"{DIM}Query:   {service}{RESET}")
+    if scope:
+        print(f"{DIM}Scope:   {scope}{RESET}")
+    print()
+
+    data = make_request(url)
+    if data is None:
+        sys.exit(1)
+
+    # Header
+    print(f"{BOLD}{data.get('display_name', data.get('name', service))}{RESET}")
+    print(f"  Service:     {data.get('service_name', service)}")
+    print(f"  URL:         {data.get('url', 'N/A')}")
+    print(f"  Type:        {data.get('service_type', data.get('type', 'N/A'))}")
+    print(f"  Auth:        {data.get('auth_method', 'N/A')}")
+
+    # Auth details
+    auth = data.get("auth_details") or data.get("auth", {})
+    if auth:
+        vault_path = data.get("vault_secret_path")
+        if vault_path:
+            print(f"  Vault:       {vault_path}")
+        if isinstance(auth, dict):
+            for k, v in auth.items():
+                if k not in ("method", "details"):
+                    print(f"  {k}:  {' ' * max(0, 10 - len(k))}{v}")
+
+    print()
+
+    # Procedure steps
+    steps = data.get("procedure_steps") or data.get("procedure", [])
+    if steps:
+        print(f"{BOLD}Procedure:{RESET}")
+        step_num = 0
+        for step in steps:
+            if not step or step.startswith("=="):
+                # Section header or blank line
+                if step:
+                    print(f"\n  {BOLD}{step}{RESET}")
+                else:
+                    print()
+                continue
+            step_num += 1
+            print(f"  {CYAN}{step_num}.{RESET} {step}")
+        print()
+
+    # Restrictions
+    restrictions = data.get("restrictions", [])
+    if restrictions:
+        print(f"{BOLD}Restrictions:{RESET}")
+        for r in restrictions:
+            print(f"  {RED}•{RESET} {r}")
+        print()
+
+    # Metadata
+    cr = data.get("change_record_required", False)
+    if cr:
+        print(f"  {YELLOW}⚠ Change record required{RESET}")
+        notes = data.get("change_record_notes")
+        if notes:
+            print(f"    {notes}")
+
+    allowed = data.get("allowed_agents")
+    if allowed:
+        print(f"  Allowed agents: {', '.join(allowed)}")
+
+    tags = data.get("tags")
+    if tags:
+        print(f"  Tags: {', '.join(tags)}")
+
+    active = data.get("is_active", True)
+    if not active:
+        print(f"  {RED}⚠ This service is marked INACTIVE{RESET}")
+
+    updated = data.get("updated") or data.get("updated_at")
+    if updated:
+        print(f"  {DIM}Updated: {updated}{RESET}")
+
+
+def list_services(server: str, tag: str = None):
+    """List all services registered in APS."""
+    # Try /services first (standalone APS), fall back to / (CISO Platform)
+    url = f"{server.rstrip('/')}/services"
+    if tag:
+        url += f"?tag={tag}"
+
+    print(f"{DIM}Server:  {server}{RESET}")
+    if tag:
+        print(f"{DIM}Filter:  tag={tag}{RESET}")
+    print()
+
+    data = make_request(url)
+    if data is None:
+        # Fallback: try the base URL (CISO Platform returns a list from GET /aps/)
+        fallback_url = server.rstrip('/')
+        if tag:
+            fallback_url += f"?tag={tag}"
+        data = make_request(fallback_url)
+        if data is None:
+            sys.exit(1)
+
+    if isinstance(data, list):
+        services = data
+        count = len(services)
+    else:
+        services = data.get("services", [])
+        count = data.get("count", len(services))
+
+    print(f"{BOLD}{count} service(s) registered:{RESET}")
+    print()
+    for svc in sorted(services, key=lambda s: s.get("service_name", s) if isinstance(s, dict) else s):
+        if isinstance(svc, str):
+            print(f"  {GREEN}•{RESET} {svc}")
+        elif isinstance(svc, dict):
+            name = svc.get("service_name", svc.get("service", "?"))
+            display = svc.get("display_name", svc.get("name", ""))
+            active = svc.get("is_active", True)
+            status = f"{GREEN}active{RESET}" if active else f"{RED}inactive{RESET}"
+            scopes = svc.get("scopes", [])
+            scope_str = f" scopes: {', '.join(scopes)}" if scopes else ""
+            print(f"  {GREEN}•{RESET} {name:<30} {display:<30} [{status}]{DIM}{scope_str}{RESET}")
+
+
+def health_check(server: str):
+    """Check APS server health."""
+    url = f"{server.rstrip('/')}/health"
+    print(f"{DIM}Server:  {server}{RESET}")
+    print()
+
+    data = make_request(url)
+    if data is None:
+        sys.exit(1)
+
+    status = data.get("status", "unknown")
+    color = GREEN if status == "ok" else RED
+    print(f"  Status:     {color}{status}{RESET}")
+    print(f"  Version:    {data.get('version', data.get('aps_version', 'N/A'))}")
+    print(f"  Procedures: {data.get('procedures_count', data.get('procedures_loaded', 'N/A'))}")
+    uptime = data.get("uptime_seconds")
+    if uptime is not None:
+        hours = int(uptime) // 3600
+        minutes = (int(uptime) % 3600) // 60
+        print(f"  Uptime:     {hours}h {minutes}m")
+    updated = data.get("config_updated") or data.get("generated_at")
+    if updated:
+        print(f"  Config:     {updated}")
+    integrity = data.get("integrity_valid")
+    if integrity is not None:
+        color = GREEN if integrity else RED
+        print(f"  Integrity:  {color}{integrity}{RESET}")
+
+
+def list_scopes(service: str, server: str):
+    """List available scopes for a service."""
+    print(f"{DIM}Server:  {server}{RESET}")
+    print(f"{DIM}Service: {service}{RESET}")
+    print()
+
+    # Get all services, find ones that start with "{service}-"
+    url = f"{server.rstrip('/')}/services"
+    data = make_request(url)
+    if data is None:
+        # Fallback to CISO Platform list (GET /aps/ returns all records)
+        fallback_url = f"{server.rstrip('/')}/?active_only=false"
+        data = make_request(fallback_url)
+        if data is None:
+            sys.exit(1)
+
+    if isinstance(data, list):
+        services = data
+    else:
+        services = data.get("services", [])
+
+    prefix = f"{service.lower()}-"
+    scopes = []
+    for svc in services:
+        if isinstance(svc, dict):
+            name = svc.get("service_name", svc.get("service", ""))
+            display = svc.get("display_name", svc.get("name", ""))
+            active = svc.get("is_active", True)
+        else:
+            name = svc
+            display = ""
+            active = True
+
+        if name.startswith(prefix) and active:
+            scope_name = name[len(prefix):]
+            scopes.append((scope_name, display))
+
+    if not scopes:
+        print(f"  No scopes found for '{service}'.")
+        print(f"  {DIM}The service may use a single unscoped record.{RESET}")
+        return
+
+    print(f"{BOLD}Available scopes for {service}:{RESET}")
+    print()
+    for scope_name, display in sorted(scopes):
+        print(f"  {GREEN}•{RESET} {scope_name:<20} {DIM}{display}{RESET}")
+    print()
+    print(f"{DIM}Usage: apslookup {service} -s <scope>{RESET}")
+
+
+def raw_json(service: str, server: str, scope: str = None):
+    """Output raw JSON for piping/scripting."""
+    url = f"{server.rstrip('/')}/resolve/{service}"
+    if scope:
+        url += f"?scope={scope}"
+    data = make_request(url)
+    if data is None:
+        sys.exit(1)
+    print(json.dumps(data, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="apslookup",
+        description="APS query tool — like nslookup for the Agent Procedure Service",
+        epilog="No authentication required. Set APS_SERVER env var for default server.",
+    )
+    parser.add_argument("service", nargs="?", help="Service name to resolve")
+    parser.add_argument("server", nargs="?", default=None, help="APS server URL")
+    parser.add_argument("-s", "--scope", help="Scope filter (e.g., certs, users, dns)")
+    parser.add_argument("--scopes", action="store_true", help="List available scopes for a service")
+    parser.add_argument("-l", "--list", action="store_true", help="List all services")
+    parser.add_argument("-t", "--tag", help="Filter by tag (with -l)")
+    parser.add_argument("--health", action="store_true", help="Check server health")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    args = parser.parse_args()
+
+    server = args.server or DEFAULT_SERVER
+
+    if args.health:
+        health_check(server)
+    elif args.list:
+        list_services(server, args.tag)
+    elif args.service and args.scopes:
+        list_scopes(args.service, server)
+    elif args.service:
+        if args.json:
+            raw_json(args.service, server, args.scope)
+        else:
+            resolve(args.service, server, args.scope)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
